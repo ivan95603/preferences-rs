@@ -9,3 +9,6 @@ matrix:
 os:
   - linux
   - osx
+branches:
+  only:
+    - master
