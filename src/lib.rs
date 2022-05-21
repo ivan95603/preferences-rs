@@ -147,8 +147,8 @@
 //!
 //! # Under the hood
 //! Data is written to flat files under the active user's home directory in a location specific to
-//! the operating system. This location is decided by the `app_dirs` crate with the data type
-//! `UserConfig`. Within the data directory, the files are stored in a folder hierarchy that maps
+//! the operating system. This location is decided by the `directories` crate with the function
+//! `config_dir()`. Within the data directory, the files are stored in a folder hierarchy that maps
 //! to a sanitized version of the preferences key passed to `save(..)`.
 //!
 //! The data is stored in JSON format. This has several advantages:
@@ -167,25 +167,28 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "app_dirs")]
 extern crate app_dirs;
 extern crate serde;
 extern crate serde_json;
 
-pub use app_dirs::{AppDirsError, AppInfo};
-use app_dirs::{AppDataType, get_data_root, get_app_dir};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{File, create_dir_all};
+use std::fs::{create_dir_all, File};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::string::FromUtf8Error;
 
-const DATA_TYPE: AppDataType = AppDataType::UserConfig;
 static PREFS_FILE_EXTENSION: &'static str = ".prefs.json";
 static DEFAULT_PREFS_FILENAME: &'static str = "prefs.json";
+
+pub struct AppInfo {
+    pub name: &'static str,
+    pub author: &'static str,
+}
 
 /// Generic key-value store for user data.
 ///
@@ -208,8 +211,9 @@ pub enum PreferencesError {
     Json(serde_json::Error),
     /// An error occurred during preferences file I/O.
     Io(io::Error),
+    #[cfg(feature = "app_dirs")]
     /// Couldn't figure out where to put or find the serialized data.
-    Directory(AppDirsError),
+    Directory(app_dirs::AppDirsError),
 }
 
 impl fmt::Display for PreferencesError {
@@ -218,6 +222,7 @@ impl fmt::Display for PreferencesError {
         match *self {
             Json(ref e) => e.fmt(f),
             Io(ref e) => e.fmt(f),
+            #[cfg(feature = "app_dirs")]
             Directory(ref e) => e.fmt(f),
         }
     }
@@ -229,6 +234,7 @@ impl std::error::Error for PreferencesError {
         match *self {
             Json(ref e) => e.description(),
             Io(ref e) => e.description(),
+            #[cfg(feature = "app_dirs")]
             Directory(ref e) => e.description(),
         }
     }
@@ -237,6 +243,7 @@ impl std::error::Error for PreferencesError {
         Some(match *self {
             Json(ref e) => e,
             Io(ref e) => e,
+            #[cfg(feature = "app_dirs")]
             Directory(ref e) => e,
         })
     }
@@ -263,8 +270,9 @@ impl From<std::io::Error> for PreferencesError {
     }
 }
 
-impl From<AppDirsError> for PreferencesError {
-    fn from(e: AppDirsError) -> Self {
+#[cfg(feature = "app_dirs")]
+impl From<app_dirs::AppDirsError> for PreferencesError {
+    fn from(e: app_dirs::AppDirsError) -> Self {
         PreferencesError::Directory(e)
     }
 }
@@ -316,8 +324,40 @@ pub trait Preferences: Sized {
     fn load_from<R: Read>(reader: &mut R) -> Result<Self, PreferencesError>;
 }
 
+#[cfg(feature = "app_dirs")]
+fn compute_file_path_old<S: AsRef<str>>(
+    app: &AppInfo,
+    key: S,
+) -> Result<PathBuf, PreferencesError> {
+    let app = app_dirs::AppInfo {
+        name: app.name,
+        author: app.author,
+    };
+    let mut path = app_dirs::get_app_dir(app_dirs::AppDataType::UserConfig, &app, key.as_ref())?;
+    let new_name = match path.file_name() {
+        Some(name) if !name.is_empty() => {
+            let mut new_name = OsString::with_capacity(name.len() + PREFS_FILE_EXTENSION.len());
+            new_name.push(name);
+            new_name.push(PREFS_FILE_EXTENSION);
+            new_name
+        }
+        _ => DEFAULT_PREFS_FILENAME.into(),
+    };
+    path.set_file_name(new_name);
+    Ok(path)
+}
+
 fn compute_file_path<S: AsRef<str>>(app: &AppInfo, key: S) -> Result<PathBuf, PreferencesError> {
-    let mut path = get_app_dir(DATA_TYPE, app, key.as_ref())?;
+    let mut path = prefs_base_dir().unwrap();
+
+    #[cfg(target_os = "windows")]
+    {
+        path.push(app.author);
+    }
+
+    path.push(app.name);
+    path.push(key.as_ref());
+
     let new_name = match path.file_name() {
         Some(name) if !name.is_empty() => {
             let mut new_name = OsString::with_capacity(name.len() + PREFS_FILE_EXTENSION.len());
@@ -332,10 +372,12 @@ fn compute_file_path<S: AsRef<str>>(app: &AppInfo, key: S) -> Result<PathBuf, Pr
 }
 
 impl<T> Preferences for T
-    where T: Serialize + DeserializeOwned + Sized
+where
+    T: Serialize + DeserializeOwned + Sized,
 {
     fn save<S>(&self, app: &AppInfo, key: S) -> Result<(), PreferencesError>
-        where S: AsRef<str>
+    where
+        S: AsRef<str>,
     {
         let path = compute_file_path(app, key.as_ref())?;
         path.parent().map(create_dir_all);
@@ -355,13 +397,25 @@ impl<T> Preferences for T
     }
 }
 
+#[cfg(feature = "app_dirs")]
+/// Get full path to the base directory for preferences.
+///
+/// This makes no guarantees that the specified directory path actually *exists* (though you can
+/// easily use `std::fs::create_dir_all(..)`). Returns `None` if the directory cannot be determined
+/// or is not available on the current platform.
+pub fn prefs_base_dir_old() -> Option<PathBuf> {
+    app_dirs::get_data_root(app_dirs::AppDataType::UserConfig).ok()
+}
+
 /// Get full path to the base directory for preferences.
 ///
 /// This makes no guarantees that the specified directory path actually *exists* (though you can
 /// easily use `std::fs::create_dir_all(..)`). Returns `None` if the directory cannot be determined
 /// or is not available on the current platform.
 pub fn prefs_base_dir() -> Option<PathBuf> {
-    get_data_root(AppDataType::UserConfig).ok()
+    directories::BaseDirs::new()
+        .as_ref()
+        .map(|bd| bd.config_dir().into())
 }
 
 #[cfg(test)]
@@ -383,6 +437,20 @@ mod tests {
         prefs.insert("offset".into(), "-9".into());
         prefs
     }
+
+    #[cfg(feature = "app_dirs")]
+    #[test]
+    fn migration_test() {
+        use super::*;
+        let a = prefs_base_dir();
+        let b = prefs_base_dir_old();
+        assert_eq!(a, b);
+
+        let c = compute_file_path(&APP_INFO, "mykey").unwrap();
+        let d = compute_file_path_old(&APP_INFO, "mykey").unwrap();
+        assert_eq!(c, d);
+    }
+
     #[test]
     fn test_save_load() {
         let sample_map = gen_sample_prefs();
