@@ -200,6 +200,7 @@ static DEFAULT_PREFS_FILENAME: &'static str = "prefs.json";
 ///
 /// The `author` property is currently only used by Windows, as macOS and *nix
 /// specifications don't require it. Make sure your `name` string is unique!
+#[derive(Debug, PartialEq)]
 pub struct AppInfo {
     /// Name of your app (e.g. "Hearthstone").
     pub name: &'static str,
