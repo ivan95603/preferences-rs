@@ -183,8 +183,27 @@ use std::string::FromUtf8Error;
 static PREFS_FILE_EXTENSION: &'static str = ".prefs.json";
 static DEFAULT_PREFS_FILENAME: &'static str = "prefs.json";
 
+/// Struct that holds information about your app.
+///
+/// It's recommended to create a single `const` instance of `AppInfo`:
+///
+/// ```
+/// use preferences::AppInfo;
+/// const APP_INFO: AppInfo = AppInfo{name: "Awesome App", author: "Dedicated Dev"};
+/// ```
+///
+/// # Caveats
+/// Functions in this library sanitize any characters that could be
+/// non-filename-safe from `name` and `author`. The resulting paths will be
+/// more human-readable if you stick to **letters, numbers, spaces, hyphens,
+/// underscores, and periods** for both properties.
+///
+/// The `author` property is currently only used by Windows, as macOS and *nix
+/// specifications don't require it. Make sure your `name` string is unique!
 pub struct AppInfo {
+    /// Name of your app (e.g. "Hearthstone").
     pub name: &'static str,
+    /// Author of your app (e.g. "Blizzard").
     pub author: &'static str,
 }
 
