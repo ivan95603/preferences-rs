@@ -147,8 +147,8 @@
 //!
 //! # Under the hood
 //! Data is written to flat files under the active user's home directory in a location specific to
-//! the operating system. This location is decided by the `app_dirs` crate with the data type
-//! `UserConfig`. Within the data directory, the files are stored in a folder hierarchy that maps
+//! the operating system. This location is decided by the `directories` crate with the function
+//! `config_dir()`. Within the data directory, the files are stored in a folder hierarchy that maps
 //! to a sanitized version of the preferences key passed to `save(..)`.
 //!
 //! The data is stored in JSON format. This has several advantages:
@@ -167,25 +167,46 @@
 
 #![warn(missing_docs)]
 
-extern crate app_dirs;
 extern crate serde;
 extern crate serde_json;
 
-pub use app_dirs::{AppDirsError, AppInfo};
-use app_dirs::{AppDataType, get_data_root, get_app_dir};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{File, create_dir_all};
+use std::fs::{create_dir_all, File};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::string::FromUtf8Error;
 
-const DATA_TYPE: AppDataType = AppDataType::UserConfig;
 static PREFS_FILE_EXTENSION: &'static str = ".prefs.json";
 static DEFAULT_PREFS_FILENAME: &'static str = "prefs.json";
+
+/// Struct that holds information about your app.
+///
+/// It's recommended to create a single `const` instance of `AppInfo`:
+///
+/// ```
+/// use preferences::AppInfo;
+/// const APP_INFO: AppInfo = AppInfo{name: "Awesome App", author: "Dedicated Dev"};
+/// ```
+///
+/// # Caveats
+/// Functions in this library sanitize any characters that could be
+/// non-filename-safe from `name` and `author`. The resulting paths will be
+/// more human-readable if you stick to **letters, numbers, spaces, hyphens,
+/// underscores, and periods** for both properties.
+///
+/// The `author` property is currently only used by Windows, as macOS and *nix
+/// specifications don't require it. Make sure your `name` string is unique!
+#[derive(Debug, PartialEq)]
+pub struct AppInfo {
+    /// Name of your app (e.g. "Hearthstone").
+    pub name: &'static str,
+    /// Author of your app (e.g. "Blizzard").
+    pub author: &'static str,
+}
 
 /// Generic key-value store for user data.
 ///
@@ -209,7 +230,7 @@ pub enum PreferencesError {
     /// An error occurred during preferences file I/O.
     Io(io::Error),
     /// Couldn't figure out where to put or find the serialized data.
-    Directory(AppDirsError),
+    Directory,
 }
 
 impl fmt::Display for PreferencesError {
@@ -218,7 +239,10 @@ impl fmt::Display for PreferencesError {
         match *self {
             Json(ref e) => e.fmt(f),
             Io(ref e) => e.fmt(f),
-            Directory(ref e) => e.fmt(f),
+            Directory => writeln!(
+                f,
+                "Couldn't figure out where to put or find the serialized data."
+            ),
         }
     }
 }
@@ -229,7 +253,7 @@ impl std::error::Error for PreferencesError {
         match *self {
             Json(ref e) => e.description(),
             Io(ref e) => e.description(),
-            Directory(ref e) => e.description(),
+            Directory => "Couldn't figure out where to put or find the serialized data.",
         }
     }
     fn cause(&self) -> Option<&std::error::Error> {
@@ -237,7 +261,7 @@ impl std::error::Error for PreferencesError {
         Some(match *self {
             Json(ref e) => e,
             Io(ref e) => e,
-            Directory(ref e) => e,
+            Directory => return None,
         })
     }
 }
@@ -260,12 +284,6 @@ impl From<FromUtf8Error> for PreferencesError {
 impl From<std::io::Error> for PreferencesError {
     fn from(e: std::io::Error) -> Self {
         PreferencesError::Io(e)
-    }
-}
-
-impl From<AppDirsError> for PreferencesError {
-    fn from(e: AppDirsError) -> Self {
-        PreferencesError::Directory(e)
     }
 }
 
@@ -317,7 +335,20 @@ pub trait Preferences: Sized {
 }
 
 fn compute_file_path<S: AsRef<str>>(app: &AppInfo, key: S) -> Result<PathBuf, PreferencesError> {
-    let mut path = get_app_dir(DATA_TYPE, app, key.as_ref())?;
+    let mut path = if let Some(bd) = prefs_base_dir() {
+        bd
+    } else {
+        return Err(PreferencesError::Directory);
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        path.push(app.author);
+    }
+
+    path.push(app.name);
+    path.push(key.as_ref());
+
     let new_name = match path.file_name() {
         Some(name) if !name.is_empty() => {
             let mut new_name = OsString::with_capacity(name.len() + PREFS_FILE_EXTENSION.len());
@@ -332,10 +363,12 @@ fn compute_file_path<S: AsRef<str>>(app: &AppInfo, key: S) -> Result<PathBuf, Pr
 }
 
 impl<T> Preferences for T
-    where T: Serialize + DeserializeOwned + Sized
+where
+    T: Serialize + DeserializeOwned + Sized,
 {
     fn save<S>(&self, app: &AppInfo, key: S) -> Result<(), PreferencesError>
-        where S: AsRef<str>
+    where
+        S: AsRef<str>,
     {
         let path = compute_file_path(app, key.as_ref())?;
         path.parent().map(create_dir_all);
@@ -361,7 +394,9 @@ impl<T> Preferences for T
 /// easily use `std::fs::create_dir_all(..)`). Returns `None` if the directory cannot be determined
 /// or is not available on the current platform.
 pub fn prefs_base_dir() -> Option<PathBuf> {
-    get_data_root(AppDataType::UserConfig).ok()
+    directories::BaseDirs::new()
+        .as_ref()
+        .map(|bd| bd.config_dir().into())
 }
 
 #[cfg(test)]
@@ -383,6 +418,7 @@ mod tests {
         prefs.insert("offset".into(), "-9".into());
         prefs
     }
+
     #[test]
     fn test_save_load() {
         let sample_map = gen_sample_prefs();
