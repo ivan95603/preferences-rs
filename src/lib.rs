@@ -256,7 +256,7 @@ impl std::error::Error for PreferencesError {
             Directory => "Couldn't figure out where to put or find the serialized data.",
         }
     }
-    fn cause(&self) -> Option<&std::error::Error> {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
         use PreferencesError::*;
         Some(match *self {
             Json(ref e) => e,
